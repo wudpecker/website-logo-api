@@ -1,5 +1,5 @@
 module website-logo-api
 
-go 1.23.2
+go 1.23
 
 require golang.org/x/net v0.30.0 // indirect

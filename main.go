@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/html"
@@ -145,39 +147,87 @@ func getBaseURL(url string) string {
 	return url
 }
 
-// handleRequest handles incoming HTTP requests, fetches the HTML content, and finds the favicon
+// processURL processes a single URL, fetches its favicon, and sends the result back via a channel
+func processURL(ctx context.Context, url string, ch chan<- map[string]interface{}) {
+	result := map[string]interface{}{
+		"url":     url,
+		"icon":    "",
+		"success": 0,
+	}
+
+	// Fetch HTML content for the URL
+	htmlContent, err := fetchHTMLContent(ctx, url)
+	if err != nil {
+		result["success"] = 0
+		result["icon"] = ""
+	} else {
+		// Get the base URL to handle relative favicon paths
+		baseURL := getBaseURL(url)
+
+		// Parse the HTML to find the favicon URL
+		faviconURL, err := parseHTMLForFavicon(htmlContent, baseURL)
+		if err != nil {
+			result["success"] = 0
+			result["icon"] = ""
+		} else {
+			// Update result for success
+			result["success"] = 1
+			result["icon"] = faviconURL
+		}
+	}
+
+	// Send result back via the channel
+	ch <- result
+}
+
+// handleRequest handles incoming HTTP requests for multiple URLs in parallel
 func handleRequest(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Validate and get the 'url' query parameter from the GET request
-	url := r.URL.Query().Get("url")
-	if url == "" {
-		http.Error(w, "Missing 'url' query parameter", http.StatusBadRequest)
+	// Get all 'url' query parameters from the GET request
+	urls := r.URL.Query()["url"]
+	if len(urls) == 0 {
+		http.Error(w, "Missing 'url' query parameters", http.StatusBadRequest)
 		return
 	}
 
-	// Fetch HTML content with context
-	htmlContent, err := fetchHTMLContent(ctx, url)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to fetch HTML: %v", err), http.StatusInternalServerError)
-		return
+	// Channel to collect results
+	resultsCh := make(chan map[string]interface{}, len(urls))
+	var wg sync.WaitGroup
+
+	// Start a goroutine for each URL
+	for _, url := range urls {
+		wg.Add(1)
+		go func(url string) {
+			defer wg.Done()
+			processURL(ctx, url, resultsCh)
+		}(url)
 	}
 
-	// Get the base URL to handle relative favicon paths
-	baseURL := getBaseURL(url)
+	// Close the channel once all goroutines are done
+	go func() {
+		wg.Wait()
+		close(resultsCh)
+	}()
 
-	// Parse the HTML to find the favicon URL
-	faviconURL, err := parseHTMLForFavicon(htmlContent, baseURL)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to find favicon: %v", err), http.StatusNotFound)
-		return
+	// Collect results from the channel
+	var results []map[string]interface{}
+	for result := range resultsCh {
+		results = append(results, result)
 	}
 
-	// Write the favicon URL as the response
-	w.Header().Set("Content-Type", "text/plain")
-	_, err = w.Write([]byte(faviconURL))
-	if err != nil {
-		http.Error(w, "Failed to write response", http.StatusInternalServerError)
+	// Write the JSON array response
+	writeJSONResponse(w, http.StatusOK, results)
+}
+
+// writeJSONResponse sends a JSON response with the given status code and data
+func writeJSONResponse(w http.ResponseWriter, statusCode int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+
+	// Encode data as JSON and write to response
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 	}
 }
 
