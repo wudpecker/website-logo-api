@@ -1,0 +1,37 @@
+name: Deploy the logo API service to GCP
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  PROJECT_ID: wudpecker
+  SERVICE_ACCOUNT: ${{ secrets.GCP_SA_KEY }}
+  REPO: website-logo-api
+  REGION: europe-west3
+  IMAGE: website-logo-api-image
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v0
+        with:
+          service_account_key: ${{ env.SERVICE_ACCOUNT }}
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Build and Push Docker image
+        run: |
+          echo $SERVICE_ACCOUNT > gcp-key.json
+          gcloud auth activate-service-account --key-file gcp-key.json  
+          gcloud config set project $PROJECT_ID
+          gcloud auth configure-docker $REGION-docker.pkg.dev
+          docker build -t $REGION-docker.pkg.dev/$PROJECT_ID/$REPO/$IMAGE -f Dockerfile .
+          docker push $REGION-docker.pkg.dev/$PROJECT_ID/$REPO/$IMAGE
+          rm gcp-key.json
